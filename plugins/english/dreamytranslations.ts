@@ -64,7 +64,6 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
       lastUpdatedAt: string;
     }[] = [];
 
-    // Find all novel entries - use simple JSON-like pattern
     const novelMatches =
       body.match(
         /\\"id\\":\d+,\\"title\\":\\"[^\\]+\\",\\"slug\\":\\"[^\\]+\\"/g,
