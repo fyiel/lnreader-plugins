@@ -35,7 +35,7 @@ interface NovelsHubChapter {
 class NovelsHubPlugin implements Plugin.PluginBase {
   id = 'novelshub';
   name = 'NovelsHub';
-  version = '1.0.0';
+  version = '1.0.1';
   icon = 'src/en/novelshub/icon.png';
   site = 'https://novelshub.org/';
   apiUrl = 'https://api.novelshub.org/api';
