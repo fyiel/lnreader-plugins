@@ -8,34 +8,37 @@ import { defaultCover } from '@libs/defaultCover';
 class DreamyTranslationsPlugin implements Plugin.PluginBase {
   id = 'dreamytranslations';
   name = 'Dreamy Translations';
-  version = '1.7.0';
+  version = '1.1.0';
   icon = 'src/en/dreamytranslations/icon.png';
-  site = 'https://dreamy-translations.com';
-
-  imageRequestInit?: Plugin.ImageRequestInit = {
-    headers: {
-      Referer: 'https://dreamy-translations.com/',
-    },
-  };
+  site = 'https://dreamy-translations.com/';
 
   async popularNovels(
     pageNo: number,
-    { filters }: Plugin.PopularNovelsOptions<typeof this.filters>,
+    options: Plugin.PopularNovelsOptions<typeof this.filters>,
   ): Promise<Plugin.NovelItem[]> {
-    // Use default filters if none provided
-    if (!filters) filters = this.filters;
+    // Only page 1 - we fetch all novels at once
+    if (pageNo !== 1) return [];
 
-    const url = `${this.site}/series`;
+    let sortBy = 'title';
+    let illustratedOnly = false;
+
+    if (options?.showLatestNovels) {
+      sortBy = 'updates';
+    } else if (options?.filters?.sort?.value) {
+      sortBy = options.filters.sort.value;
+      illustratedOnly = options.filters.illustrated?.value ?? false;
+    }
+
+    const url = `${this.site}series`;
     const response = await fetchApi(url);
     const body = await response.text();
 
     let illustrationCounts: Record<string, number> | null = null;
-    const needsIllustrationData =
-      filters.illustrated.value || filters.sort.value === 'illustrations';
+    const needsIllustrationData = illustratedOnly || sortBy === 'illustrations';
     if (needsIllustrationData) {
       try {
         const illustrationResponse = await fetchApi(
-          `${this.site}/api/illustration-counts`,
+          `${this.site}api/illustration-counts`,
           {
             headers: {
               Accept: 'application/json',
@@ -43,14 +46,15 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
             },
           },
         );
-        const illustrationData = await illustrationResponse.json();
-        illustrationCounts = illustrationData.counts || {};
+        if (illustrationResponse.ok) {
+          const illustrationData = await illustrationResponse.json();
+          illustrationCounts = illustrationData.counts || {};
+        }
       } catch {}
     }
 
     // novel data from RSC payload (escaped JSON)
-    // \"id\":123,\"title\":\"...\",\"slug\":\"...\",...\"total_chapters\":50,...\"view_count\":1000,...\"last_updated_at\":\"...\"
-    interface NovelData {
+    const novelsData: {
       id: string;
       title: string;
       slug: string;
@@ -58,19 +62,27 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
       totalChapters: number;
       viewCount: number;
       lastUpdatedAt: string;
-    }
+    }[] = [];
 
-    const novelsData: NovelData[] = [];
-    const novelRegex =
-      /\\"id\\":(\d+),\\"title\\":\\"(.*?)\\",\\"slug\\":\\"([^\\]+)\\"/g;
+    // Find all novel entries - use simple JSON-like pattern
+    const novelMatches =
+      body.match(
+        /\\"id\\":\d+,\\"title\\":\\"[^\\]+\\",\\"slug\\":\\"[^\\]+\\"/g,
+      ) || [];
 
-    let match;
-    while ((match = novelRegex.exec(body)) !== null) {
-      const id = match[1];
-      const title = this.unescapeJson(match[2]);
-      const slug = match[3];
+    for (const novelStr of novelMatches) {
+      const idMatch = novelStr.match(/\\"id\\":(\d+)/);
+      const titleMatch = novelStr.match(/\\"title\\":\\"([^\\]+)\\"/);
+      const slugMatch = novelStr.match(/\\"slug\\":\\"([^\\]+)\\"/);
 
-      const afterMatch = body.substring(match.index, match.index + 2000);
+      if (!idMatch || !titleMatch || !slugMatch) continue;
+
+      const id = idMatch[1];
+      const title = this.unescapeJson(titleMatch[1]);
+      const slug = slugMatch[1];
+
+      const idx = body.indexOf(novelStr);
+      const afterMatch = body.substring(idx, idx + 2000);
       const chaptersMatch = afterMatch.match(/\\"total_chapters\\":(\d+)/);
       const viewsMatch = afterMatch.match(/\\"view_count\\":(\d+)/);
       const updatedMatch = afterMatch.match(
@@ -99,11 +111,10 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
     });
 
     let filteredNovels = uniqueNovels;
-    if (filters.illustrated.value && illustrationCounts) {
+    if (illustratedOnly && illustrationCounts) {
       filteredNovels = uniqueNovels.filter(n => n.id in illustrationCounts!);
     }
 
-    const sortBy = filters.sort.value;
     filteredNovels.sort((a, b) => {
       switch (sortBy) {
         case 'chapters':
@@ -138,7 +149,7 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
-    const url = `${this.site}/${novelPath}`;
+    const url = `${this.site}${novelPath}`;
     const response = await fetchApi(url);
     const body = await response.text();
 
@@ -182,31 +193,42 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
     if (genresMatch) {
       const genres = genresMatch[1].match(/\\"([^\\]+)\\"/g);
       if (genres) {
-        novel.genres = genres.map(g => g.replace(/\\"/g, '')).join(', ');
+        novel.genres = genres
+          .map((g: string) => g.replace(/\\"/g, ''))
+          .join(', ');
       }
     }
 
     novel.status = NovelStatus.Ongoing;
 
     // illustration chapter indices from the RSC payload
-    // \"chapterIndex\":96
     const illustratedChapters = new Set<number>();
-    const illustrationRegex = /\\"chapterIndex\\":(\d+)/g;
-    let illustMatch;
-    while ((illustMatch = illustrationRegex.exec(body)) !== null) {
-      illustratedChapters.add(parseInt(illustMatch[1]));
+    const illustMatches = body.match(/\\"chapterIndex\\":\d+/g) || [];
+    for (const illustStr of illustMatches) {
+      const numMatch = illustStr.match(/(\d+)/);
+      if (numMatch) {
+        illustratedChapters.add(parseInt(numMatch[1]));
+      }
     }
 
     // chapters from the RSC payload
     const chapters: Plugin.ChapterItem[] = [];
     const novelSlug = novelPath.replace('novel/', '');
 
-    // {\"id\":123,\"title\":\"...\",\"slug\":\"...\",\"index\":1,\"free\":true,\"status\":\"published\"
-    const chapterRegex =
-      /\{\\"id\\":\d+,\\"title\\":\\"([^\\]+)\\",\\"slug\\":\\"[^\\]+\\",\\"index\\":(\d+),\\"free\\":(true|false),\\"status\\":\\"([^\\]+)\\"/g;
-    let match;
-    while ((match = chapterRegex.exec(body)) !== null) {
-      const [, title, indexStr, , status] = match;
+    const chapterEntries =
+      body.match(
+        /\{\\"id\\":\d+,\\"title\\":\\"[^\\]+\\",\\"slug\\":\\"[^\\]+\\",\\"index\\":\d+,\\"free\\":(true|false),\\"status\\":\\"[^\\]+\\"/g,
+      ) || [];
+    for (const chapterStr of chapterEntries) {
+      const titleMatch = chapterStr.match(/\\"title\\":\\"([^\\]+)\\"/);
+      const indexMatch = chapterStr.match(/\\"index\\":(\d+)/);
+      const statusMatch = chapterStr.match(/\\"status\\":\\"([^\\]+)\\"/);
+
+      if (!titleMatch || !indexMatch || !statusMatch) continue;
+
+      const title = titleMatch[1];
+      const indexStr = indexMatch[1];
+      const status = statusMatch[1];
       const index = parseInt(indexStr);
       if (status === 'published') {
         const hasIllustration = illustratedChapters.has(index);
@@ -237,7 +259,7 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
-    const url = `${this.site}/${chapterPath}`;
+    const url = `${this.site}${chapterPath}`;
     const response = await fetchApi(url);
     const body = await response.text();
     const $ = parseHTML(body);
@@ -279,13 +301,14 @@ class DreamyTranslationsPlugin implements Plugin.PluginBase {
     searchTerm: string,
     pageNo: number,
   ): Promise<Plugin.NovelItem[]> {
-    const allNovels = await this.popularNovels(pageNo, {
+    if (pageNo !== 1) return [];
+
+    const novels = await this.popularNovels(1, {
       showLatestNovels: false,
       filters: this.filters,
     });
-
     const searchLower = searchTerm.toLowerCase();
-    return allNovels.filter(novel =>
+    return novels.filter(novel =>
       novel.name.toLowerCase().includes(searchLower),
     );
   }
